@@ -4,7 +4,8 @@
   "description": "",
   "main": "server.cjs",
   "scripts": {
-    "start": "node server.cjs"
+    "start": "node server.cjs",
+    "postinstall": "npm rebuild better-sqlite3"
   },
   "keywords": [],
   "author": "",
@@ -16,3 +17,4 @@
     "express": "^5.1.0"
   }
 }
+
