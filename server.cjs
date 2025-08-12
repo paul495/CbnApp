@@ -57,48 +57,40 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/filters", (req, res) => {
   try {
     const { Ministry_Category, category, language, state } = req.query;
-    const pickedCategory = (Ministry_Category ?? category ?? "Choirs in concert");
+    const cat = (Ministry_Category ?? category ?? "Choirs in concert").toString();
 
-    // Build params once
-    const p = {
-      cat: pickedCategory,
-      language: language ? String(language) : null,
-      state: state ? String(state) : null,
-    };
-
-    // LANGUAGES list (narrowed by state if provided)
+    // LANGUAGES — always returned
     const langs = cbn.prepare(`
       SELECT DISTINCT UPPER(TRIM(Segment_Language)) AS v
       FROM YT_tbl
       WHERE Ministry_Category = @cat
-        AND Segment_Language IS NOT NULL
-        AND TRIM(Segment_Language) <> ''
-        ${p.state ? "AND TRIM(Church_State) = TRIM(@state)" : ""}
+        AND Segment_Language IS NOT NULL AND TRIM(Segment_Language) <> ''
+        ${state ? "AND TRIM(Church_State) = TRIM(@state)" : ""}
       ORDER BY v
-    `).all(p).map(r => r.v);
+    `).all({ cat, state }).map(r => r.v);
 
-    // STATES list (narrowed by language if provided)
-    const states = cbn.prepare(`
-      SELECT DISTINCT TRIM(Church_State) AS v
-      FROM YT_tbl
-      WHERE Ministry_Category = @cat
-        AND Church_State IS NOT NULL
-        AND TRIM(Church_State) <> ''
-        ${p.language ? "AND UPPER(TRIM(Segment_Language)) = UPPER(TRIM(@language))" : ""}
-      ORDER BY v
-    `).all(p).map(r => r.v);
+    // If Choirs, also return states & churches (narrowed by language/state)
+    let states = [], churches = [];
+    if (cat === "Choirs in concert") {
+      states = cbn.prepare(`
+        SELECT DISTINCT TRIM(Church_State) AS v
+        FROM YT_tbl
+        WHERE Ministry_Category = @cat
+          AND Church_State IS NOT NULL AND TRIM(Church_State) <> ''
+          ${language ? "AND UPPER(TRIM(Segment_Language)) = UPPER(TRIM(@language))" : ""}
+        ORDER BY v
+      `).all({ cat, language }).map(r => r.v);
 
-    // CHURCHES list (narrowed by both if provided)
-    const churches = cbn.prepare(`
-      SELECT DISTINCT TRIM(Church_Name) AS v
-      FROM YT_tbl
-      WHERE Ministry_Category = @cat
-        AND Church_Name IS NOT NULL
-        AND TRIM(Church_Name) <> ''
-        ${p.language ? "AND UPPER(TRIM(Segment_Language)) = UPPER(TRIM(@language))" : ""}
-        ${p.state ? "AND TRIM(Church_State) = TRIM(@state)" : ""}
-      ORDER BY v
-    `).all(p).map(r => r.v);
+      churches = cbn.prepare(`
+        SELECT DISTINCT TRIM(Church_Name) AS v
+        FROM YT_tbl
+        WHERE Ministry_Category = @cat
+          AND Church_Name IS NOT NULL AND TRIM(Church_Name) <> ''
+          ${language ? "AND UPPER(TRIM(Segment_Language)) = UPPER(TRIM(@language))" : ""}
+          ${state ? "AND TRIM(Church_State) = TRIM(@state)" : ""}
+        ORDER BY v
+      `).all({ cat, language, state }).map(r => r.v);
+    }
 
     res.set("Cache-Control", "no-store");
     res.json({ languages: langs, states, churches });
@@ -164,32 +156,59 @@ app.get("/enz/dates", (_req, res) => {
 });
 
 // ENZ by date
+// Years that have shows
+app.get("/enz/years", (_req, res) => {
+  try {
+    const years = enz.prepare(`
+      SELECT DISTINCT strftime('%Y', Telecast_date) AS y
+      FROM ENZ_EPS
+      WHERE Telecast_date IS NOT NULL
+      ORDER BY y DESC
+    `).all().map(r => r.y);
+    res.set("Cache-Control", "no-store");
+    res.json({ years });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Months available within a year
+app.get("/enz/months", (req, res) => {
+  try {
+    const { year } = req.query;
+    const months = enz.prepare(`
+      SELECT DISTINCT strftime('%m', Telecast_date) AS m
+      FROM ENZ_EPS
+      WHERE Telecast_date IS NOT NULL
+        AND strftime('%Y', Telecast_date) = @year
+      ORDER BY m DESC
+    `).all({ year: String(year) }).map(r => r.m);
+    res.set("Cache-Control", "no-store");
+    res.json({ months });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Episodes filtered by year & month (both optional)
 app.get("/enz", (req, res) => {
   try {
-    const { date } = req.query;
+    const { year, month } = req.query;
     const { limit, offset } = paginated(req);
+    const where = ["Telecast_date IS NOT NULL"];
+    const p = { limit, offset };
 
-    const where = [];
-    const params = { limit, offset };
-    if (date) { where.push(`date(Telecast_date) = date(@date)`); params.date = date; }
+    if (year)  { where.push(`strftime('%Y', Telecast_date) = @year`);  p.year  = String(year); }
+    if (month) { where.push(`strftime('%m', Telecast_date) = @month`); p.month = String(month); }
 
-    const sql = `
-      SELECT rowid as id,
-             Video_Title as title,
-             Youtube_Links as youtubeUrl,
-             Telecast_date as telecastDate,
-             Upload_Date as uploadDate
+    const rows = enz.prepare(`
+      SELECT rowid as id, Video_Title as title, Upload_Date as uploadDate,
+             Telecast_date as telecastDate, Youtube_Links as youtubeUrl, ESS_CODE
       FROM ENZ_EPS
       ${where.length ? "WHERE " + where.join(" AND ") : ""}
       ORDER BY Telecast_date DESC
-      LIMIT @limit OFFSET @offset`;
+      LIMIT @limit OFFSET @offset
+    `).all(p);
 
-    const rows = enz.prepare(sql).all(params);
+    res.set("Cache-Control", "no-store");
     res.json(rows);
-  } catch (e) {
-    console.error("[/enz] error:", e);
-    res.status(500).json({ error: String(e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 const PORT = process.env.PORT || 8080;
