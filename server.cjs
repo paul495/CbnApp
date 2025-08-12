@@ -55,21 +55,33 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // filters (from CBNYT)
 app.get("/filters", (_req, res) => {
   try {
+    // Languages (normalized & sorted)
     const langs = cbn.prepare(`
-      SELECT DISTINCT Segment_Language AS v
+      SELECT DISTINCT UPPER(TRIM(Segment_Language)) AS v
       FROM YT_tbl
-      WHERE Segment_Language IS NOT NULL AND Segment_Language <> ''
-      ORDER BY 1
+      WHERE Segment_Language IS NOT NULL AND TRIM(Segment_Language) <> ''
+      ORDER BY v
     `).all().map(r => r.v);
 
+    // States from Church_State (normalized & sorted)
+    const states = cbn.prepare(`
+      SELECT DISTINCT TRIM(Church_State) AS v
+      FROM YT_tbl
+      WHERE Church_State IS NOT NULL AND TRIM(Church_State) <> ''
+      ORDER BY v
+    `).all().map(r => r.v);
+
+    // Churches (normalized & sorted)
     const churches = cbn.prepare(`
-      SELECT DISTINCT Church_Name AS v
+      SELECT DISTINCT TRIM(Church_Name) AS v
       FROM YT_tbl
-      WHERE Church_Name IS NOT NULL AND Church_Name <> ''
-      ORDER BY 1
+      WHERE Church_Name IS NOT NULL AND TRIM(Church_Name) <> ''
+      ORDER BY v
     `).all().map(r => r.v);
 
-    res.json({ languages: langs, churches });
+    // avoid browser/proxy caching
+    res.set("Cache-Control", "no-store");
+    res.json({ languages: langs, states, churches });
   } catch (e) {
     console.error("[/filters] error:", e);
     res.status(500).json({ error: String(e) });
@@ -79,7 +91,7 @@ app.get("/filters", (_req, res) => {
 // videos (CBNYT) — supports ?Ministry_Category=… or ?category=…
 app.get("/videos", (req, res) => {
   try {
-    const { Ministry_Category, category, language, church, q } = req.query;
+    const { Ministry_Category, category, language, church, state, q } = req.query;
     const pickedCategory = Ministry_Category ?? category;
     const { limit, offset } = paginated(req);
 
@@ -87,24 +99,27 @@ app.get("/videos", (req, res) => {
     const params = { limit, offset };
 
     if (pickedCategory) { where.push(`Ministry_Category = @category`); params.category = pickedCategory; }
-    if (language)      { where.push(`Segment_Language = @language`);  params.language = language; }
-    if (church)        { where.push(`Church_Name = @church`);         params.church = church; }
-    if (q)             { where.push(`(Video_Title LIKE @q OR Church_Name LIKE @q)`); params.q = `%${q}%`; }
+    if (language)      { where.push(`UPPER(TRIM(Segment_Language)) = UPPER(TRIM(@language))`); params.language = String(language); }
+    if (state)         { where.push(`TRIM(Church_State) = TRIM(@state)`);                      params.state    = String(state); }
+    if (church)        { where.push(`TRIM(Church_Name) = TRIM(@church)`);                      params.church   = String(church); }
+    if (q)             { where.push(`(Video_Title LIKE @q OR Church_Name LIKE @q)`);           params.q        = `%${q}%`; }
 
     const sql = `
       SELECT rowid as id,
-             Video_Title as title,
-             Segment_Language as language,
-             Ministry_Category as category,
-             Church_Name as churchName,
-             Youtube_Links as youtubeUrl,
-             Upload_Date as uploadDate
+             Video_Title         as title,
+             Segment_Language    as language,
+             Ministry_Category   as category,
+             Church_Name         as churchName,
+             Church_State        as churchState,
+             Youtube_Links       as youtubeUrl,
+             Upload_Date         as uploadDate
       FROM YT_tbl
       ${where.length ? "WHERE " + where.join(" AND ") : ""}
       ORDER BY Upload_Date DESC
       LIMIT @limit OFFSET @offset`;
 
     const rows = cbn.prepare(sql).all(params);
+    res.set("Cache-Control", "no-store");
     res.json(rows);
   } catch (e) {
     console.error("[/videos] error:", e);
