@@ -53,33 +53,53 @@ const paginated = (req) => {
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // filters (from CBNYT)
-app.get("/filters", (_req, res) => {
+// /filters with dependent narrowing
+app.get("/filters", (req, res) => {
   try {
-    // Languages (normalized & sorted)
+    const { Ministry_Category, category, language, state } = req.query;
+    const pickedCategory = (Ministry_Category ?? category ?? "Choirs in concert");
+
+    // Build params once
+    const p = {
+      cat: pickedCategory,
+      language: language ? String(language) : null,
+      state: state ? String(state) : null,
+    };
+
+    // LANGUAGES list (narrowed by state if provided)
     const langs = cbn.prepare(`
       SELECT DISTINCT UPPER(TRIM(Segment_Language)) AS v
       FROM YT_tbl
-      WHERE Segment_Language IS NOT NULL AND TRIM(Segment_Language) <> ''
+      WHERE Ministry_Category = @cat
+        AND Segment_Language IS NOT NULL
+        AND TRIM(Segment_Language) <> ''
+        ${p.state ? "AND TRIM(Church_State) = TRIM(@state)" : ""}
       ORDER BY v
-    `).all().map(r => r.v);
+    `).all(p).map(r => r.v);
 
-    // States from Church_State (normalized & sorted)
+    // STATES list (narrowed by language if provided)
     const states = cbn.prepare(`
       SELECT DISTINCT TRIM(Church_State) AS v
       FROM YT_tbl
-      WHERE Church_State IS NOT NULL AND TRIM(Church_State) <> ''
+      WHERE Ministry_Category = @cat
+        AND Church_State IS NOT NULL
+        AND TRIM(Church_State) <> ''
+        ${p.language ? "AND UPPER(TRIM(Segment_Language)) = UPPER(TRIM(@language))" : ""}
       ORDER BY v
-    `).all().map(r => r.v);
+    `).all(p).map(r => r.v);
 
-    // Churches (normalized & sorted)
+    // CHURCHES list (narrowed by both if provided)
     const churches = cbn.prepare(`
       SELECT DISTINCT TRIM(Church_Name) AS v
       FROM YT_tbl
-      WHERE Church_Name IS NOT NULL AND TRIM(Church_Name) <> ''
+      WHERE Ministry_Category = @cat
+        AND Church_Name IS NOT NULL
+        AND TRIM(Church_Name) <> ''
+        ${p.language ? "AND UPPER(TRIM(Segment_Language)) = UPPER(TRIM(@language))" : ""}
+        ${p.state ? "AND TRIM(Church_State) = TRIM(@state)" : ""}
       ORDER BY v
-    `).all().map(r => r.v);
+    `).all(p).map(r => r.v);
 
-    // avoid browser/proxy caching
     res.set("Cache-Control", "no-store");
     res.json({ languages: langs, states, churches });
   } catch (e) {
@@ -87,6 +107,7 @@ app.get("/filters", (_req, res) => {
     res.status(500).json({ error: String(e) });
   }
 });
+
 
 // videos (CBNYT) — supports ?Ministry_Category=… or ?category=…
 app.get("/videos", (req, res) => {
