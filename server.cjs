@@ -14,18 +14,21 @@ const DATA_DIR = process.env.DB_DIR || "./data";
 const SEED_DIR = "./seed";
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// seed copy on first boot
+const OVERWRITE = process.env.SEED_OVERWRITE === "1";
+
+// seed copy on first boot (or overwrite if flag is set)
 for (const f of ["CBNYT_sql.db", "ENZ_sql.db"]) {
   const src = path.join(SEED_DIR, f);
   const dst = path.join(DATA_DIR, f);
   console.log("[boot] seed check", {
-    src, dst, srcExists: fs.existsSync(src), dstExists: fs.existsSync(dst)
+    src, dst, srcExists: fs.existsSync(src), dstExists: fs.existsSync(dst), overwrite: OVERWRITE
   });
-  if (!fs.existsSync(dst) && fs.existsSync(src)) {
+  if ((!fs.existsSync(dst) || OVERWRITE) && fs.existsSync(src)) {
     fs.copyFileSync(src, dst);
-    console.log("[boot] seeded", f);
+    console.log("[boot] seeded", f, OVERWRITE ? "(overwrite)" : "");
   }
 }
+
 
 // open DBs
 let cbn, enz;
