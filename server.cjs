@@ -54,54 +54,63 @@ app.get("/healthz", (_req, res) => res.json({ ok: true }));
 // ------------------- filters (CBNYT) -------------------
 // Category-aware: returns languages for any category.
 // If category is “Choirs in concert”, also returns states and churches.
+// /filters?Ministry_Category=Choirs%20in%20concert&language=Hindi&state=Punjab
 app.get("/filters", (req, res) => {
   try {
-    const { Ministry_Category, category, language, state } = req.query;
-    const cat = (Ministry_Category ?? category ?? "Choirs in concert").toString();
+    const { Ministry_Category, language, state } = req.query;
+
+    const W = [];
+    const P = {};
+    if (Ministry_Category) { W.push("Ministry_Category = @cat"); P.cat = Ministry_Category; }
+    if (language)          { W.push("Segment_Language = @lang"); P.lang = language; }
+    if (state)             { W.push("Church_State = @st");        P.st = state; }
+
+    const baseWhere = W.length ? `WHERE ${W.join(" AND ")}` : "";
 
     const langs = cbn.prepare(`
-      SELECT DISTINCT UPPER(TRIM(Segment_Language)) AS v
+      SELECT DISTINCT Segment_Language AS v
       FROM YT_tbl
-      WHERE Ministry_Category = @cat
-        AND Segment_Language IS NOT NULL AND TRIM(Segment_Language) <> ''
-        ${state ? "AND TRIM(Church_State) = TRIM(@state)" : ""}
-      ORDER BY v
-    `).all({ cat, state }).map(r => r.v);
+      ${Ministry_Category ? "WHERE Ministry_Category = @cat" : ""}
+      ORDER BY 1
+    `).all({ cat: Ministry_Category }).map(r => r.v);
 
-    let states = [], churches = [];
-    if (cat === "Choirs in concert") {
-      states = cbn.prepare(`
-        SELECT DISTINCT TRIM(Church_State) AS v
-        FROM YT_tbl
-        WHERE Ministry_Category = @cat
-          AND Church_State IS NOT NULL AND TRIM(Church_State) <> ''
-          ${language ? "AND UPPER(TRIM(Segment_Language)) = UPPER(TRIM(@language))" : ""}
-        ORDER BY v
-      `).all({ cat, language }).map(r => r.v);
+    const states = cbn.prepare(`
+      SELECT DISTINCT Church_State AS v
+      FROM YT_tbl
+      ${[
+          Ministry_Category ? "Ministry_Category = @cat" : null,
+          language ? "Segment_Language = @lang" : null,
+        ].filter(Boolean).length
+          ? "WHERE " + [ Ministry_Category ? "Ministry_Category = @cat" : null,
+                         language ? "Segment_Language = @lang" : null]
+              .filter(Boolean).join(" AND ")
+          : ""
+      }
+      AND Church_State IS NOT NULL AND TRIM(Church_State) <> ''
+      ORDER BY 1
+    `).all({ cat: Ministry_Category, lang: language }).map(r => r.v);
 
-      churches = cbn.prepare(`
-        SELECT DISTINCT TRIM(Church_Name) AS v
-        FROM YT_tbl
-        WHERE Ministry_Category = @cat
-          AND Church_Name IS NOT NULL AND TRIM(Church_Name) <> ''
-          ${language ? "AND UPPER(TRIM(Segment_Language)) = UPPER(TRIM(@language))" : ""}
-          ${state ? "AND TRIM(Church_State) = TRIM(@state)" : ""}
-        ORDER BY v
-      `).all({ cat, language, state }).map(r => r.v);
-    }
+    const churches = cbn.prepare(`
+      SELECT DISTINCT Church_Name AS v
+      FROM YT_tbl
+      ${baseWhere}
+      AND Church_Name IS NOT NULL AND TRIM(Church_Name) <> ''
+      ORDER BY 1
+    `).all(P).map(r => r.v);
 
-    res.set("Cache-Control", "no-store");
     res.json({ languages: langs, states, churches });
   } catch (e) {
-    console.error("[/filters] error:", e);
+    console.error("[/filters]", e);
     res.status(500).json({ error: String(e) });
   }
 });
 
+
 // ------------------- videos (CBNYT) -------------------
+// videos (CBNYT)
 app.get("/videos", (req, res) => {
   try {
-    const { Ministry_Category, category, language, church, q, state } = req.query;
+    const { Ministry_Category, category, language, church, state, q } = req.query;
     const pickedCategory = Ministry_Category ?? category;
     const { limit, offset } = paginated(req);
 
@@ -109,33 +118,77 @@ app.get("/videos", (req, res) => {
     const params = { limit, offset };
 
     if (pickedCategory) { where.push(`Ministry_Category = @category`); params.category = pickedCategory; }
-    if (language)      { where.push(`UPPER(TRIM(Segment_Language)) = UPPER(TRIM(@language))`);  params.language = language; }
-    if (church)        { where.push(`TRIM(Church_Name) = TRIM(@church)`);                       params.church = church; }
-    if (state)         { where.push(`TRIM(Church_State) = TRIM(@state)`);                       params.state = state; }
-    if (q)             { where.push(`(Video_Title LIKE @q OR Church_Name LIKE @q)`);            params.q = `%${q}%`; }
+    if (language)      { where.push(`Segment_Language = @language`);  params.language = language; }
+    if (state)         { where.push(`Church_State = @state`);          params.state = state; }
+    if (church)        { where.push(`Church_Name = @church`);          params.church = church; }
+    if (q)             { where.push(`(Video_Title LIKE @q OR Church_Name LIKE @q)`); params.q = `%${q}%`; }
 
     const sql = `
-      SELECT rowid as id,
-             Video_Title as title,
-             Segment_Language as language,
-             Ministry_Category as category,
-             Church_Name as churchName,
-             Church_State as churchState,
-             Youtube_Links as youtubeUrl,
+      SELECT rowid as id, Video_Title as title,
+             Segment_Language as language, Ministry_Category as category,
+             Church_Name as churchName, Youtube_Links as youtubeUrl,
              Upload_Date as uploadDate
       FROM YT_tbl
       ${where.length ? "WHERE " + where.join(" AND ") : ""}
       ORDER BY Upload_Date DESC
       LIMIT @limit OFFSET @offset`;
 
-    const rows = cbn.prepare(sql).all(params);
-    res.set("Cache-Control", "no-store");
-    res.json(rows);
+    res.json(cbn.prepare(sql).all(params));
   } catch (e) {
     console.error("[/videos] error:", e);
     res.status(500).json({ error: String(e) });
   }
 });
+// Distinct states for choirs, optionally narrowed by language
+app.get("/filters/states", (req, res) => {
+  try {
+    const { Ministry_Category, language } = req.query;
+    const where = ["Church_State IS NOT NULL AND TRIM(Church_State) <> ''"];
+    const p = {};
+
+    if (Ministry_Category) { where.push("Ministry_Category = @cat"); p.cat = Ministry_Category; }
+    if (language)          { where.push("Segment_Language  = @lang"); p.lang = language; }
+
+    const rows = cbn.prepare(`
+      SELECT DISTINCT Church_State AS v
+      FROM YT_tbl
+      ${where.length ? "WHERE " + where.join(" AND ") : ""}
+      ORDER BY 1
+    `).all(p);
+
+    res.json({ states: rows.map(r => r.v) });
+  } catch (e) {
+    console.error("[/filters/states] error:", e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Distinct churches for choirs, narrowed by language + state
+app.get("/filters/churches", (req, res) => {
+  try {
+    const { Ministry_Category, language, state } = req.query;
+    const where = ["Church_Name IS NOT NULL AND TRIM(Church_Name) <> ''"];
+    const p = {};
+
+    if (Ministry_Category) { where.push("Ministry_Category = @cat"); p.cat = Ministry_Category; }
+    if (language)          { where.push("Segment_Language  = @lang"); p.lang = language; }
+    if (state)             { where.push("Church_State       = @state"); p.state = state; }
+
+    const rows = cbn.prepare(`
+      SELECT DISTINCT Church_Name AS v
+      FROM YT_tbl
+      ${where.length ? "WHERE " + where.join(" AND ") : ""}
+      ORDER BY 1
+    `).all(p);
+
+    res.json({ churches: rows.map(r => r.v) });
+  } catch (e) {
+    console.error("[/filters/churches] error:", e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+
 
 // =================== ENZ SHOWS ===================
 
@@ -197,26 +250,42 @@ app.get("/enz/years", (_req, res) => {
 
 
 // Months (MM) within a year that have at least one playable episode
-app.get("/enz/months", (req, res) => {
-  try {
-    const { year } = req.query;
-    if (!year) return res.status(400).json({ error: "year is required" });
+app.get('/enz/months', (req, res) => {
+  const year = req.query.year;
+  if (!year) {
+    return res.status(400).json({ error: 'Year is required' });
+  }
 
-    const rows = enz.prepare(`
-      SELECT strftime('%m', Telecast_date) AS m
-      FROM ENZ_EPS
-      WHERE Telecast_date IS NOT NULL AND TRIM(Telecast_date) <> ''
-        AND strftime('%Y', Telecast_date) = @year
-        AND Youtube_Links IS NOT NULL AND TRIM(Youtube_Links) <> ''
-      GROUP BY m
-      HAVING COUNT(*) > 0
-      ORDER BY m DESC
-    `).all({ year: String(year) });
+  const sql = `
+    SELECT DISTINCT strftime('%m', Telecast_date) AS month
+    FROM ENZ_EPS
+    WHERE strftime('%Y', Telecast_date) = ?
+    ORDER BY month DESC
+  `;
 
-    res.set("Cache-Control", "no-store");
-    res.json({ months: rows.map(r => r.m).filter(Boolean) });
-  } catch (e) { res.status(500).json({ error: String(e) }); }
+  db.all(sql, [year], (err, rows) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+
+    const monthNames = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+
+    const result = rows.map(row => {
+      const monthNum = parseInt(row.month, 10);
+      return {
+        number: row.month,
+        name: monthNames[monthNum - 1]
+      };
+    });
+
+    res.json({ months: result });
+  });
 });
+
 
 // 3) Start server (KEEP LAST)
 const PORT = process.env.PORT || 8080;
