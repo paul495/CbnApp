@@ -5,6 +5,11 @@ const cors = require("cors");
 const Database = require("better-sqlite3");
 const fs = require("fs");
 const path = require("path");
+const MONTH_NAME = {
+  '01':'January','02':'February','03':'March','04':'April',
+  '05':'May','06':'June','07':'July','08':'August',
+  '09':'September','10':'October','11':'November','12':'December'
+};
 
 // ------------------- app bootstrap -------------------
 console.log("[boot] starting server.cjs");
@@ -254,7 +259,7 @@ app.get("/enz/years", (_req, res) => {
 // Add ?names=1 to get label+value objects.
 app.get("/enz/months", (req, res) => {
   try {
-    const { year, names } = req.query;
+    const { year, names } = req.query;           // names=1 -> include month names
     if (!year) return res.status(400).json({ error: "year is required" });
 
     const rows = enz.prepare(`
@@ -268,23 +273,20 @@ app.get("/enz/months", (req, res) => {
       ORDER BY m DESC
     `).all({ year: String(year) });
 
-    const months = rows.map(r => r.m).filter(Boolean);
-
     res.set("Cache-Control", "no-store");
 
-    // Backward compatible (numbers) if no flag is set:
+    // Backward-compatible: default returns ["07","06",...]
     if (names === '1') {
-      // return objects with value + human name, newest-first
       return res.json({
-        months: months.map(mm => ({ value: mm, name: monthName(mm) }))
+        months: rows.map(r => ({ value: r.m, name: MONTH_NAME[r.m] || r.m }))
       });
     }
-    // old behavior
-    res.json({ months });
+    return res.json({ months: rows.map(r => r.m) });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 });
+
 
 
 // 3) Start server (KEEP LAST)
