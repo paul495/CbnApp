@@ -250,40 +250,40 @@ app.get("/enz/years", (_req, res) => {
 
 
 // Months (MM) within a year that have at least one playable episode
-app.get('/enz/months', (req, res) => {
-  const year = req.query.year;
-  if (!year) {
-    return res.status(400).json({ error: 'Year is required' });
-  }
+// Months (MM) within a year that have at least one playable episode
+// Add ?names=1 to get label+value objects.
+app.get("/enz/months", (req, res) => {
+  try {
+    const { year, names } = req.query;
+    if (!year) return res.status(400).json({ error: "year is required" });
 
-  const sql = `
-    SELECT DISTINCT strftime('%m', Telecast_date) AS month
-    FROM ENZ_EPS
-    WHERE strftime('%Y', Telecast_date) = ?
-    ORDER BY month DESC
-  `;
+    const rows = enz.prepare(`
+      SELECT strftime('%m', Telecast_date) AS m
+      FROM ENZ_EPS
+      WHERE Telecast_date IS NOT NULL AND TRIM(Telecast_date) <> ''
+        AND strftime('%Y', Telecast_date) = @year
+        AND Youtube_Links IS NOT NULL AND TRIM(Youtube_Links) <> ''
+      GROUP BY m
+      HAVING COUNT(*) > 0
+      ORDER BY m DESC
+    `).all({ year: String(year) });
 
-  db.all(sql, [year], (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: 'Database error' });
+    const months = rows.map(r => r.m).filter(Boolean);
+
+    res.set("Cache-Control", "no-store");
+
+    // Backward compatible (numbers) if no flag is set:
+    if (names === '1') {
+      // return objects with value + human name, newest-first
+      return res.json({
+        months: months.map(mm => ({ value: mm, name: monthName(mm) }))
+      });
     }
-
-    const monthNames = [
-      'January', 'February', 'March', 'April', 'May', 'June',
-      'July', 'August', 'September', 'October', 'November', 'December'
-    ];
-
-    const result = rows.map(row => {
-      const monthNum = parseInt(row.month, 10);
-      return {
-        number: row.month,
-        name: monthNames[monthNum - 1]
-      };
-    });
-
-    res.json({ months: result });
-  });
+    // old behavior
+    res.json({ months });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 
