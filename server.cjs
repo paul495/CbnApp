@@ -60,52 +60,44 @@ app.get("/healthz", (_req, res) => res.json({ ok: true }));
 // Category-aware: returns languages for any category.
 // If category is “Choirs in concert”, also returns states and churches.
 // /filters?Ministry_Category=Choirs%20in%20concert&language=Hindi&state=Punjab
+// filters (from CBNYT)
 app.get("/filters", (req, res) => {
   try {
-    const { Ministry_Category, language, state } = req.query;
+    const { Ministry_Category } = req.query;
 
-    const W = [];
-    const P = {};
-    if (Ministry_Category) { W.push("Ministry_Category = @cat"); P.cat = Ministry_Category; }
-    if (language)          { W.push("Segment_Language = @lang"); P.lang = language; }
-    if (state)             { W.push("Church_State = @st");        P.st = state; }
+    const where = [];
+    if (Ministry_Category) where.push(`Ministry_Category = @cat`);
 
-    const baseWhere = W.length ? `WHERE ${W.join(" AND ")}` : "";
+    const params = { cat: Ministry_Category };
 
     const langs = cbn.prepare(`
       SELECT DISTINCT Segment_Language AS v
       FROM YT_tbl
-      ${Ministry_Category ? "WHERE Ministry_Category = @cat" : ""}
+      ${where.length ? "WHERE " + where.join(" AND ") : ""}
+      AND Segment_Language IS NOT NULL AND TRIM(Segment_Language) <> ''
       ORDER BY 1
-    `).all({ cat: Ministry_Category }).map(r => r.v);
-
-    const states = cbn.prepare(`
-      SELECT DISTINCT Church_State AS v
-      FROM YT_tbl
-      ${[
-          Ministry_Category ? "Ministry_Category = @cat" : null,
-          language ? "Segment_Language = @lang" : null,
-        ].filter(Boolean).length
-          ? "WHERE " + [ Ministry_Category ? "Ministry_Category = @cat" : null,
-                         language ? "Segment_Language = @lang" : null]
-              .filter(Boolean).join(" AND ")
-          : ""
-      }
-      AND Church_State IS NOT NULL AND TRIM(Church_State) <> ''
-      ORDER BY 1
-    `).all({ cat: Ministry_Category, lang: language }).map(r => r.v);
+    `).all(params).map(r => r.v);
 
     const churches = cbn.prepare(`
       SELECT DISTINCT Church_Name AS v
       FROM YT_tbl
-      ${baseWhere}
+      ${where.length ? "WHERE " + where.join(" AND ") : ""}
       AND Church_Name IS NOT NULL AND TRIM(Church_Name) <> ''
       ORDER BY 1
-    `).all(P).map(r => r.v);
+    `).all(params).map(r => r.v);
 
-    res.json({ languages: langs, states, churches });
+    // NEW: themes (used by “Gospel Presentation”)
+    const themes = cbn.prepare(`
+      SELECT DISTINCT Ministry_Theme AS v
+      FROM YT_tbl
+      ${where.length ? "WHERE " + where.join(" AND ") : ""}
+      AND Ministry_Theme IS NOT NULL AND TRIM(Ministry_Theme) <> ''
+      ORDER BY 1
+    `).all(params).map(r => r.v);
+
+    res.json({ languages: langs, churches, themes });
   } catch (e) {
-    console.error("[/filters]", e);
+    console.error("[/filters] error:", e);
     res.status(500).json({ error: String(e) });
   }
 });
@@ -115,7 +107,7 @@ app.get("/filters", (req, res) => {
 // videos (CBNYT)
 app.get("/videos", (req, res) => {
   try {
-    const { Ministry_Category, category, language, church, state, q } = req.query;
+    const { Ministry_Category, category, language, church, q, Ministry_Theme } = req.query;  // 👈 Added Ministry_Theme
     const pickedCategory = Ministry_Category ?? category;
     const { limit, offset } = paginated(req);
 
@@ -124,46 +116,30 @@ app.get("/videos", (req, res) => {
 
     if (pickedCategory) { where.push(`Ministry_Category = @category`); params.category = pickedCategory; }
     if (language)      { where.push(`Segment_Language = @language`);  params.language = language; }
-    if (state)         { where.push(`Church_State = @state`);          params.state = state; }
-    if (church)        { where.push(`Church_Name = @church`);          params.church = church; }
-    if (q)             { where.push(`(Video_Title LIKE @q OR Church_Name LIKE @q)`); params.q = `%${q}%`; }
+    if (church)        { where.push(`Church_Name = @church`);         params.church = church; }
+
+    if (Ministry_Theme) { where.push(`Ministry_Theme = @theme`);      params.theme = Ministry_Theme; }  // 👈 Your new filter
+
+    if (q) { where.push(`(Video_Title LIKE @q OR Church_Name LIKE @q)`); params.q = `%${q}%`; }
 
     const sql = `
-      SELECT rowid as id, Video_Title as title,
-             Segment_Language as language, Ministry_Category as category,
-             Church_Name as churchName, Youtube_Links as youtubeUrl,
+      SELECT rowid as id,
+             Video_Title as title,
+             Segment_Language as language,
+             Ministry_Category as category,
+             Ministry_Theme as theme,
+             Church_Name as churchName,
+             Youtube_Links as youtubeUrl,
              Upload_Date as uploadDate
       FROM YT_tbl
       ${where.length ? "WHERE " + where.join(" AND ") : ""}
       ORDER BY Upload_Date DESC
       LIMIT @limit OFFSET @offset`;
 
-    res.json(cbn.prepare(sql).all(params));
+    const rows = cbn.prepare(sql).all(params);
+    res.json(rows);
   } catch (e) {
     console.error("[/videos] error:", e);
-    res.status(500).json({ error: String(e) });
-  }
-});
-// Distinct states for choirs, optionally narrowed by language
-app.get("/filters/states", (req, res) => {
-  try {
-    const { Ministry_Category, language } = req.query;
-    const where = ["Church_State IS NOT NULL AND TRIM(Church_State) <> ''"];
-    const p = {};
-
-    if (Ministry_Category) { where.push("Ministry_Category = @cat"); p.cat = Ministry_Category; }
-    if (language)          { where.push("Segment_Language  = @lang"); p.lang = language; }
-
-    const rows = cbn.prepare(`
-      SELECT DISTINCT Church_State AS v
-      FROM YT_tbl
-      ${where.length ? "WHERE " + where.join(" AND ") : ""}
-      ORDER BY 1
-    `).all(p);
-
-    res.json({ states: rows.map(r => r.v) });
-  } catch (e) {
-    console.error("[/filters/states] error:", e);
     res.status(500).json({ error: String(e) });
   }
 });
